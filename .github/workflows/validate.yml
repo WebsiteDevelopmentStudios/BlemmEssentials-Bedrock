@@ -1,0 +1,22 @@
+name: Validate Bedrock addon scripts
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check JavaScript syntax
+        run: |
+          find BP -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check
+      - name: Validate pack manifests
+        run: |
+          node -e "JSON.parse(require('fs').readFileSync('BP/manifest.json', 'utf8'))"
