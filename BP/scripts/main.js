@@ -1,233 +1,102 @@
-import { system, world } from "@minecraft/server";
-import { sendError } from "./utils/debug.js";
-import { registerNavigationCommands } from "./commands/navigation.js";
-import { registerEconomyCommands }    from "./commands/economy.js";
-import { registerInfoCommands }       from "./commands/info.js";
-import { registerSocialCommands }     from "./commands/social.js";
-import { registerShopCommands }       from "./commands/shop.js";
-import { registerModerationCommands } from "./commands/moderation.js";
-import { registerAdminCommands }      from "./commands/admin.js";
-import { registerStarMenu }           from "./starmenu.js";
-import { SHOP_PRESETS, SELL_PRESETS } from "./presets.js";
-import {
-    getBans, saveBans, getMutes, getSettings,
-    setMoney, getMoney, addLog,
-    getShopItems, saveShopItems, getSellPrices, saveSellPrices
-} from "./utils/db.js";
-import { warn } from "./utils/format.js";
-import { CustomCommandPermissionLevel } from "./utils/constants.js";
-import { isAdmin } from "./utils/perm.js";
+import { world, system, ItemStack } from "@minecraft/server";
+import { ActionFormData } from "@minecraft/server-ui";
 
-// ── Command registration ───────────────────────────────────────────────────────
-const commandMap = new Map();
-
-const mockReg = {
-    registerCommand(opts, handler) {
-        commandMap.set(opts.name, { opts, handler });
-    }
-};
-
-for (const [label, fn] of [
-    ["navigation",  () => registerNavigationCommands(mockReg)],
-    ["economy",     () => registerEconomyCommands(mockReg)],
-    ["info",        () => registerInfoCommands(mockReg)],
-    ["social",      () => registerSocialCommands(mockReg)],
-    ["shop",        () => registerShopCommands(mockReg)],
-    ["moderation",  () => registerModerationCommands(mockReg)],
-    ["admin",       () => registerAdminCommands(mockReg)],
-]) {
-    try { fn(); }
-    catch (e) { sendError(`[register:${label}] ${e?.stack ?? e}`); }
-}
-
-registerStarMenu();
-
-system.run(() => {
-    try {
-        if (getShopItems().length === 0) saveShopItems(SHOP_PRESETS);
-        if (Object.keys(getSellPrices()).length === 0) saveSellPrices(SELL_PRESETS);
-    } catch (e) { sendError("[shop-init] " + e); }
-});
-
-// ── Chat command dispatch ──────────────────────────────────────────────────────
-function runCommand(player, rawMsg) {
-    const parts   = rawMsg.slice(1).trim().split(/\s+/);
-    const keyword = (parts[0] ?? "").toLowerCase();
-    const cmdName = "be:" + keyword;
-    const args    = parts.slice(1);
-
-    // Wait a few ticks so the chat bar fully closes before any UI form is shown
-    system.runTimeout(() => {
-        try {
-            const entry = commandMap.get(cmdName);
-            if (!entry) {
-                player.sendMessage(
-                    `§c§lUnknown command: §e!${keyword}§c. Type §e!help§c for the list.`
-                );
-                return;
-            }
-            if (
-                entry.opts.permissionLevel === CustomCommandPermissionLevel.GameDirectors &&
-                !isAdmin(player)
-            ) {
-                player.sendMessage("§c§lNo permission for this command.");
-                return;
-            }
-            entry.handler({ sourceEntity: player }, ...args);
-        } catch (e) {
-            try { player.sendMessage("§c§lCommand error: §r" + e); } catch {}
-            sendError(`[!${keyword}] ${e?.stack ?? e}`);
-        }
-    }, 5);
-}
-
-// ── Chat interception ─────────────────────────────────────────────────────────
-const _seen = new Map();
-
-function tryDispatch(player, msg) {
-    if (!player || !msg || !msg.startsWith("!")) return;
-
-    try {
-        if (getMutes()[player.name]) {
-            system.run(() => {
-                try { player.sendMessage(warn("You are muted.")); } catch {}
-            });
-            return;
-        }
-    } catch {}
-
-    const key = (player.id ?? player.name ?? "?") + ":" + msg;
-    if (_seen.has(key)) return;
-    _seen.set(key, true);
-    system.runTimeout(() => _seen.delete(key), 2);
-
-    runCommand(player, msg);
-}
-
-// ── Chat interception (Bedrock 26.x compatibility) ────────────────────────────
-// chatSend is a pre-release API in some Bedrock builds and may be unavailable
-// unless Beta APIs are enabled. Probe capabilities instead of assuming the
-// event exists. Before-events are preferred because they can hide !commands.
+// Keep the entry point self-contained: a broken optional module must never stop
+// the whole pack from loading.
+const PREFIX = "§6[§eBE§6]§r ";
+const balances = new Map();
+const homes = new Map();
 let chatHooked = false;
-let chatCanCancel = false;
 
-function subscribeChatEvent(signal, label, canCancel) {
-    if (!signal || typeof signal.subscribe !== "function") return false;
-    try {
-        signal.subscribe((ev) => {
-            const player = ev?.sender ?? ev?.player ?? ev?.sourceEntity ?? null;
-            const msg = typeof ev?.message === "string"
-                ? ev.message
-                : (typeof ev?.text === "string" ? ev.text : "");
-            if (!player || typeof player.sendMessage !== "function" || !msg.startsWith("!")) return;
-            if (canCancel) {
-                try { ev.cancel = true; } catch (e) {
-                    console.warn(`[BE] ${label}: unable to cancel chat message: ${e}`);
-                }
-            }
-            tryDispatch(player, msg);
-        });
-        console.log(`[BE] ${label} subscribed — !commands active${canCancel ? "" : " (command text may appear in chat)"}`);
-        return true;
-    } catch (e) {
-        console.warn(`[BE] ${label} subscription failed: ${e}`);
-        return false;
+function reply(player, message) {
+  try { player.sendMessage(PREFIX + message); } catch {}
+}
+function help(player) {
+  reply(player, "§eCommands: !help, !ping, !balance, !menu, !sethome, !home, !spawn");
+  reply(player, "If chat aliases are unavailable, run §f/scriptevent be:help§r.");
+}
+function execute(player, text) {
+  const parts = String(text ?? "").trim().split(/\s+/);
+  const cmd = (parts.shift() ?? "").toLowerCase().replace(/^!/, "");
+  switch (cmd) {
+    case "help": case "?": help(player); break;
+    case "ping": reply(player, "§aPong! Blemm Essentials is running."); break;
+    case "balance": case "bal":
+      reply(player, "Balance: §a$" + (balances.get(player.name) ?? 1000).toLocaleString());
+      break;
+    case "sethome":
+      homes.set(player.name, { dimension: player.dimension, location: { ...player.location } });
+      reply(player, "§aHome saved.");
+      break;
+    case "home": {
+      const h = homes.get(player.name);
+      if (!h) { reply(player, "§cNo home saved yet. Use !sethome first."); break; }
+      try { player.teleport(h.location, { dimension: h.dimension }); reply(player, "§aTeleported home."); }
+      catch { reply(player, "§cCouldn't teleport to your home."); }
+      break;
     }
+    case "spawn":
+      reply(player, "§eNo server spawn is configured yet. Use !sethome to save a location.");
+      break;
+    case "menu": openMenu(player); break;
+    default: reply(player, "§cUnknown command: !" + cmd + ". Type !help.");
+  }
 }
-
+function openMenu(player) {
+  try {
+    new ActionFormData().title("§6Blemm Essentials").body("Choose an option")
+      .button("Help / Commands").button("Balance").button("Set Home").button("Home")
+      .show(player).then(r => {
+        if (r.canceled) return;
+        if (r.selection === 0) help(player);
+        if (r.selection === 1) execute(player, "balance");
+        if (r.selection === 2) execute(player, "sethome");
+        if (r.selection === 3) execute(player, "home");
+      }).catch(e => console.warn("[BE] menu error: " + e));
+  } catch (e) { reply(player, "Menu unavailable: " + e); }
+}
+function chatHandler(ev, canCancel) {
+  const player = ev?.sender ?? ev?.player ?? ev?.sourceEntity;
+  const message = typeof ev?.message === "string" ? ev.message : "";
+  if (!player || !message.startsWith("!")) return;
+  if (canCancel) { try { ev.cancel = true; } catch {} }
+  system.runTimeout(() => execute(player, message), 1);
+}
 try {
-    chatHooked = subscribeChatEvent(world.beforeEvents?.chatSend, "beforeEvents.chatSend", true);
-    chatCanCancel = chatHooked;
-} catch (e) {
-    console.warn("[BE] beforeEvents.chatSend unavailable: " + e);
-}
-
-// Fallbacks for builds where the experimental before-chat signal is absent.
+  const before = world.beforeEvents?.chatSend;
+  if (before?.subscribe) { before.subscribe(ev => chatHandler(ev, true)); chatHooked = true; }
+} catch (e) { console.warn("[BE] before chat hook failed: " + e); }
 if (!chatHooked) {
-    const candidates = [
-        ["beforeEvents.playerChat", world.beforeEvents?.playerChat, true],
-        ["beforeEvents.chatMessage", world.beforeEvents?.chatMessage, true],
-        ["afterEvents.chatSend", world.afterEvents?.chatSend, false],
-        ["afterEvents.playerChat", world.afterEvents?.playerChat, false],
-        ["afterEvents.chatMessage", world.afterEvents?.chatMessage, false],
-    ];
-    for (const [label, signal, canCancel] of candidates) {
-        if (subscribeChatEvent(signal, label, canCancel)) {
-            chatHooked = true;
-            chatCanCancel = canCancel;
-            break;
-        }
+  try {
+    const after = world.afterEvents?.chatSend;
+    if (after?.subscribe) { after.subscribe(ev => chatHandler(ev, false)); chatHooked = true; }
+  } catch (e) { console.warn("[BE] after chat hook failed: " + e); }
+}
+try {
+  system.afterEvents.scriptEventReceive.subscribe(ev => {
+    if (!String(ev.id).startsWith("be:")) return;
+    const player = ev.sourceEntity;
+    if (player && typeof player.sendMessage === "function") {
+      execute(player, String(ev.id).slice(3) + (ev.message ? " " + ev.message : ""));
     }
-}
+  });
+} catch (e) { console.warn("[BE] scriptevent hook failed: " + e); }
 
-if (!chatHooked) {
-    console.warn("[BE] Chat interception unavailable. Enable Beta APIs / use /scriptevent be:help.");
-}
-
-// ── /scriptevent fallback ─────────────────────────────────────────────────────
-try {
-    system.afterEvents.scriptEventReceive.subscribe((ev) => {
-        if (!ev.id.startsWith("be:")) return;
-        const player = ev.sourceEntity ?? null;
-        if (!player || typeof player.sendMessage !== "function") return;
-        const keyword = ev.id.slice(3);
-        const argStr  = typeof ev.message === "string" ? ev.message.trim() : "";
-        const fakeMsg = "!" + keyword + (argStr ? " " + argStr : "");
-        tryDispatch(player, fakeMsg);
-    });
-    console.log("[BE] scriptEventReceive subscribed OK — /scriptevent be:<cmd> works");
-} catch (e) { console.error("[BE] scriptEventReceive failed: " + e); }
-
-// ── Player spawn ──────────────────────────────────────────────────────────────
-world.afterEvents.playerSpawn.subscribe((event) => {
-    if (!event.initialSpawn) return;
-    const player = event.player;
-
-    // Ban check
+world.afterEvents.playerSpawn.subscribe(ev => {
+  if (!ev.initialSpawn) return;
+  const player = ev.player;
+  if (!balances.has(player.name)) balances.set(player.name, 1000);
+  system.runTimeout(() => {
     try {
-        const bans = getBans();
-        const ban  = bans[player.name];
-        if (ban) {
-            if (ban.type === "temp" && Date.now() > ban.expires) {
-                delete bans[player.name];
-                saveBans(bans);
-            } else {
-                const reason = ban.reason ?? "No reason given";
-                const extra  = ban.type === "temp"
-                    ? `\n§7Expires: §f${new Date(ban.expires).toLocaleString()}` : "";
-                system.run(() => {
-                    player.runCommandAsync(
-                        `kick "${player.name}" §cYou are banned.\n§7Reason: §f${reason}${extra}`
-                    ).catch(() => {});
-                });
-                return;
-            }
-        }
-    } catch (e) { sendError("[ban-check] " + e); }
-
-    // Starting balance
-    try {
-        const settings = getSettings();
-        if (getMoney(player) === 0 && settings.startingBalance > 0) {
-            setMoney(player, settings.startingBalance);
-        }
-    } catch (e) { sendError("[money-init] " + e); }
-
-    const chatNote = chatHooked
-        ? `§7Type §e!help §7for commands.`
-        : `§7Type §e/scriptevent be:help §7for commands. Enable Beta APIs for !commands.`;
-
-    player.sendMessage([
-        "",
-        `§a§l[BE] §rBlemm Essentials loaded! §7(${commandMap.size} commands)`,
-        `§6§l Welcome to the Server! §r`,
-        chatNote,
-        "",
-    ].join("\n"));
-
-    addLog({ action: "join", player: player.name });
+      const inventory = player.getComponent("minecraft:inventory")?.container;
+      if (inventory && !Array.from({length: inventory.size}, (_, i) => inventory.getItem(i)).some(it => it?.typeId === "be:menu_star")) {
+        inventory.addItem(new ItemStack("be:menu_star", 1));
+      }
+    } catch (e) { console.warn("[BE] menu star could not be given: " + e); }
+    reply(player, "§aBlemm Essentials loaded! " + (chatHooked ? "Type §e!help§a for commands." : "Use §e/scriptevent be:help§a for commands."));
+  }, 20);
 });
-
-world.afterEvents.playerLeave.subscribe((event) => {
-    addLog({ action: "leave", player: event.playerName });
+world.afterEvents.itemUse.subscribe(ev => {
+  if (ev.itemStack?.typeId === "be:menu_star") openMenu(ev.source);
 });
+console.warn("[BE] Blemm Essentials entry point loaded. Chat hook: " + chatHooked);
