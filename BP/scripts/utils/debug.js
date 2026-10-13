@@ -1,0 +1,1 @@
+export function sendError(message){console.warn("[Blemm Essentials] "+message);}
