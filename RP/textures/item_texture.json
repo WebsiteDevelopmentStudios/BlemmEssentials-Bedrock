@@ -1,0 +1,5 @@
+{
+    "resource_pack_name": "BlemEssentials_RP",
+    "texture_name": "atlas.items",
+    "texture_data": {"be_menu_star": {"textures": "textures/items/be_menu_star"}}
+}
