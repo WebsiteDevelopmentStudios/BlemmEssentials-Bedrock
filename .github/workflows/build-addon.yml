@@ -1,0 +1,53 @@
+name: Build Bedrock Addon
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate source and package addon
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f BP/manifest.json || { echo "::error::Missing BP/manifest.json"; exit 1; }
+          test -f RP/manifest.json || { echo "::error::Missing RP/manifest.json"; exit 1; }
+          test -f BP/scripts/main.js || { echo "::error::Missing BP/scripts/main.js"; exit 1; }
+          test -d BP/scripts/commands || { echo "::error::Missing BP/scripts/commands; full addon source has not been committed."; exit 1; }
+          test -f RP/textures/item_texture.json || { echo "::error::Missing RP/textures/item_texture.json"; exit 1; }
+          test -f RP/textures/items/be_menu_star.png || { echo "::error::Missing RP/textures/items/be_menu_star.png"; exit 1; }
+          find BP/scripts -type f -name '*.js' -print0 | xargs -0 -n1 node --check
+          python3 - <<'PY'
+          import json
+          for path in ("BP/manifest.json", "RP/manifest.json"):
+              with open(path, encoding="utf-8") as f:
+                  json.load(f)
+              print("Valid JSON:", path)
+          PY
+          mkdir -p build
+          (cd BP && zip -qr ../build/BlemmEssentials_BP.mcpack .)
+          (cd RP && zip -qr ../build/BlemmEssentials_RP.mcpack .)
+          cp build/BlemmEssentials_BP.mcpack build/BlemmEssentials_RP.mcpack build/
+          python3 - <<'PY'
+          import zipfile
+          with zipfile.ZipFile("build/BlemmEssentials_26.52.mcaddon", "w", zipfile.ZIP_DEFLATED) as out:
+              out.write("build/BlemmEssentials_BP.mcpack", "BlemmEssentials_BP.mcpack")
+              out.write("build/BlemmEssentials_RP.mcpack", "BlemmEssentials_RP.mcpack")
+          PY
+
+      - name: Upload installable addon
+        uses: actions/upload-artifact@v4
+        with:
+          name: BlemmEssentials-26.52-mcaddon
+          path: build/BlemmEssentials_26.52.mcaddon
+          if-no-files-found: error
+          retention-days: 30
