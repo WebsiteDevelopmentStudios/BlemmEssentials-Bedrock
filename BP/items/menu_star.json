@@ -1,0 +1,12 @@
+{
+    "format_version": "1.20.60",
+    "minecraft:item": {
+        "description": {"identifier": "be:menu_star", "category": "Items"},
+        "components": {
+            "minecraft:display_name": {"value": "§6☆ §eServer Menu §6☆"},
+            "minecraft:icon": {"textures": {"default": "be_menu_star"}},
+            "minecraft:use_duration": 0.05,
+            "minecraft:max_stack_size": 1
+        }
+    }
+}
