@@ -36,7 +36,6 @@ jobs:
           mkdir -p build
           (cd BP && zip -qr ../build/BlemmEssentials_BP.mcpack .)
           (cd RP && zip -qr ../build/BlemmEssentials_RP.mcpack .)
-          cp build/BlemmEssentials_BP.mcpack build/BlemmEssentials_RP.mcpack build/
           python3 - <<'PY'
           import zipfile
           with zipfile.ZipFile("build/BlemmEssentials_26.52.mcaddon", "w", zipfile.ZIP_DEFLATED) as out:
